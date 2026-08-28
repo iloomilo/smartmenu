@@ -1,117 +1,127 @@
 # Arbeitsteilung: vier parallele Lanes
 
-Ziel: vier Leute (oder Agents) arbeiten gleichzeitig, ohne sich in denselben Dateien zu treffen
-und ohne aufeinander zu warten.
+Ziel: vier Agents arbeiten gleichzeitig, ohne sich in denselben Dateien zu treffen und ohne
+aufeinander zu warten. Grundlage ist [README.md](README.md).
 
 ## Schritt 0 – gemeinsam, vor dem Split
 
-Das lässt sich nicht parallelisieren und muss zuerst stehen, sonst bauen vier Leute vier
-verschiedene Annahmen. Einmal zusammen festlegen, dann einfrieren:
+Nicht parallelisierbar. Steht das nicht zuerst, bauen vier Leute vier verschiedene Annahmen.
+Einmal festlegen, dann einfrieren:
 
-1. **`MenuDoc`-JSON** (`shared/types/menu.ts`) – das kanonische Karten-Format.
-2. **QR-Payload** (`shared/types/qr.ts`) – Binärlayout und Kodierung. Es gibt keine Order-Entität.
-3. **Drizzle-Schema in Modul-Dateien** aufteilen (siehe unten), Migration 0001 einmal generieren.
-   Kein `users`/`accounts`-Tabellenpaar – es gibt keine Restaurant-Konten.
-4. **Fixtures** (`shared/fixtures/`): eine realistische Beispielkarte als `MenuDoc`, ein
-   Beispiel-QR-Payload, zwei Übersetzungsstände. Damit kann jede Lane sofort loslegen, auch wenn die
-   anderen drei noch nichts geliefert haben.
-5. **Fehlerformat** und `restaurantId`-Scoping-Regel.
+1. **Drizzle-Schema** in Modul-Dateien: `server/db/schema/{restaurants,menus,scans}.ts`,
+   `index.ts` re-exportiert nur. Migration 0001 einmal generieren. Die Starter-Tabelle
+   `menu_items` mit `price_cents NOT NULL` wird ersetzt, kein paralleles Cents-Feld.
+2. **Tick-Vertrag** (`shared/types/extract.ts`): Request (Frame + aktuelle Items) und das
+   Patch-JSON-Schema, das dem Modell vorgegeben und gegen das validiert wird.
+3. **QR-Payload** (`shared/types/qr.ts`): Binärlayout und Kodierung.
+4. **Modell-Client-Interface** (`server/services/model/`): eine Funktion, ein Fake daneben.
+   Ohne dieses Interface kann niemand testen.
+5. **Fixtures** (`shared/fixtures/`): eine realistische Karte als Item-Liste, eine Tick-Folge
+   aus Patches (inklusive Verfeinerung derselben Zeile), ein QR-Payload, zwei Sprachstände.
+6. **Fehlerformat** und die Scoping-Regel (jede Query auf ein Menu oder ein Restaurant).
 
-Alles darunter ist Vertrag. Wer ihn ändern will, macht das sichtbar für alle, nicht nebenbei.
+Alles darunter ist Vertrag. Wer ihn ändert, macht es sichtbar, nicht nebenbei.
 
 ## Die vier Lanes
 
-### Lane A – Scan & Extraktion
-Von hochgeladenem Foto/Video zu einem validierten `MenuDoc`.
+### Lane A – Extraktion (Server)
+Vom Frame zum gespeicherten Item.
 
-- Upload-Endpunkte, Signed URLs, Storage
-- Video-Frames extrahieren, dedupen (Content-Hash, Unschärfe-Filter)
-- Vision-Call, Prompt, Retries, Confidence
-- Merge mehrerer Seiten/Frames zu einer Karte, Validierung gegen das `MenuDoc`-Schema
-- Statusmaschine des `ScanJob`
+- `POST /api/menus/:id/ticks`: Frame entgegennehmen, Modell aufrufen, Patches validieren, upserten
+- Modell-Client gegen die OpenAI-kompatible API (`MODEL_BASE_URL`, `MODEL_API_KEY`, `MODEL_NAME`),
+  Antwort per JSON-Schema erzwungen
+- Upsert auf `(menuId, sourceName, sourceSection)`; Verfeinern statt Duplizieren
+- Frames nach dem Aufruf verwerfen, auch im Fehlerfall. Nichts auf Platte, nichts in Postgres
+- Sprach-Erkennung und Übersetzung in die Zielsprache im selben Aufruf
+- Fehlerzählung pro Session, retryable Fehler nach außen sichtbar machen
 
-**Besitzt:** `server/api/scans/`, `server/services/extraction/`, `server/jobs/`, `server/db/schema/scans.ts`
-**Liefert nach außen:** `ScanJob`-Status + ein `MenuDoc` → Lane B
-**Kann sofort starten:** ja, gegen Fixture-Bilder
+**Besitzt:** `server/api/menus/[id]/ticks*`, `server/services/model/`, `server/services/extract/`, `schema/scans.ts`
+**Grenze nach außen:** der Tick-Vertrag
+**Kann sofort starten:** ja, gegen das Fake-Modell und die Patch-Fixtures
 
-### Lane B – Menü-Domäne & Übersetzung
-Von `MenuDoc` zu einer versionierten, mehrsprachigen Karte in der DB.
+### Lane B – Menü-Domäne, Cache & Übersetzung
+Von Items zu einer gecachten, mehrsprachigen Karte.
 
-- Menu-Versionierung, Ablösung alter Versionen, `currentMenuId` pro `kind`
-- Matching: Ist dieser Scan dieselbe Karte wie die aktuelle Version? Dann nur bestätigen
-  (`confirmCount++`, `lastConfirmedAt`) statt eine neue Version anzulegen (E7)
-- Freshness: wann eine Karte als veraltet gilt und ein Update angeboten wird (E11)
-- Import eines `MenuDoc` in die normalisierten Tabellen, Export zurück
-- Translation-Tabelle, Auflösung mit Fallback-Kette, Glossar
-- Übersetzungs-Worker, Nachziehen fehlender Locales
-- `GET /api/menus/:id?locale=` – die Ausspiel-API
+- Menu-Lebenszyklus `scanning → sealed`, Positionen beim Versiegeln stabil vergeben
+- Cache: `currentMenuId` pro `kind`, Freshness, Ablösung über `supersededById`
+- Matching beim Neu-Scan: identisch → nur `confirmCount`/`lastConfirmedAt`, abweichend → neue Version (E7)
+- Translation-Tabelle, Fallback-Kette, Nachübersetzung weiterer Sprachen ohne neue Frames
+- `GET /api/menus/:id?locale=` – die Ausspiel-API, nach Sektionen gruppiert
 
-**Besitzt:** `server/db/schema/menus.ts`, `server/api/menus/`, `server/services/translation/`
-**Liefert nach außen:** die Ausspiel-API → Lane C
-**Kann sofort starten:** ja, gegen das Fixture-`MenuDoc`
+**Besitzt:** `schema/menus.ts`, `server/api/menus/`, `server/services/translation/`
+**Grenze nach außen:** die Ausspiel-API
+**Kann sofort starten:** ja, gegen die Karten-Fixture
 
 ### Lane C – Gast-Frontend
 Alles, was der Gast sieht.
 
 - Restaurant-Picker: Vorschlagsliste nach Distanz, Textsuche als Fallback
-- Kamera-/Upload-UI, Scan-Fortschritt – nur im Ausnahmefall, wenn keine Karte im Cache liegt
-- „Karte aktualisieren" und der Hinweis auf veraltete Stände
-- Korrektur-Schritt direkt nach dem Scan: der Gast hat die Karte vor sich und ist der Einzige,
-  der eine falsche Extraktion bemerken kann
-- Karten-Ansicht: Sektionen, Items, Optionen, Allergen-Filter, Sprachumschalter
-- Auswahl/Warenkorb, clientseitig persistent (funktioniert ohne Netz weiter)
-- QR-Code lokal aus der Auswahl erzeugen, ohne Server-Roundtrip
+- Kamera-Vollbild mit Bottom Sheet, Hinweistext, Trefferzähler
+- **Frame-Auswahl im Client**: unscharfe und zum Vorgänger nahezu identische Frames gar nicht
+  senden, Ziel 1–2 gesendete fps (E13)
+- Liste stabil halten: kein Flackern, kein Voll-Replace, Auswahl hängt an `menuItem.id`
+- Pause bei Hintergrund, harte Zeitgrenze mit „Fortsetzen", Kamera aus nach „Fertig"
+- Fehlerserie: Liste behalten, pausieren, „Erneut versuchen"
+- Mengen-Review, QR-Code lokal erzeugen
+- Karte aus dem Cache anzeigen samt Datumshinweis und „Karte aktualisieren"
 
-**Besitzt:** `app/` (alles außer der Kellner-Route), `app/composables/`
-**Konsumiert:** Lane A (Scan-Status), Lane B (Menü-API), Lane D (QR-Kodierung)
+**Besitzt:** `app/` außer der Kellner-Route
+**Konsumiert:** Lane A (Ticks), Lane B (Ausspiel-API), Lane D (Places, QR-Kodierung)
 **Kann sofort starten:** ja, gegen Fixtures und Mock-Endpunkte
 
-### Lane D – QR, Kellner & Restaurant-Identität
-Von der Auswahl zur gescannten Bestellung.
+### Lane D – Restaurant-Identität, QR & Kellner
+Ort rein, gescannte Bestellung raus.
 
-- QR-Payload kodieren und dekodieren, Versionsbyte, Kompaktheit (Ziel: unter 100 Byte)
-- Auflösung `menuId` + Item-Indizes gegen die Menü-Tabelle
-- Kellner-Ansicht `/s/:payload` – schlanke Seite, **Originaltext der Karte** groß, Übersetzung
-  klein darunter. Kein Login, der Payload in der URL ist alles, was sie braucht
-- Restaurant-Identität: Geolocation → Places Nearby → Vorschlagsliste, Auflösung auf
-  `googlePlaceId`, Anlage neuer Restaurant-Datensätze, Fallback ohne GPS
-- Anonyme Device-Token, Geo-Nähe-Prüfung und Rate Limits beim Scan (E9, E12)
+- Geolocation → Nearby-Suche → Vorschlagsliste, Auflösung auf `googlePlaceId`,
+  Anlage neuer Restaurant-Datensätze, Fallback ohne GPS
+- **Nearby-Ergebnisse pro Geohash-Zelle serverseitig cachen** – der Aufruf fällt sonst bei
+  jedem App-Start an und ist teurer als das Modell (E14)
+- QR-Payload kodieren und dekodieren, Versionsbyte, Ziel unter 100 Byte
+- Kellner-Ansicht `/s/:payload`: Originaltext groß, Übersetzung klein darunter, Mengen, Summe
+  nur über Zeilen mit Preis. Kein Login
+- Device-Token, Geo-Nähe-Prüfung und Rate Limits beim Scan (E9, E12)
 
-Es gibt bewusst kein Restaurant-Konto und keinen Owner-Login. Diese Lane baut kein Auth-System,
-sondern einen anonymen Gast-Zugang per Device-Token. Der Kellner braucht gar keinen.
+Diese Lane baut kein Auth-System. Es gibt einen anonymen Gast-Zugang per Device-Token, und der
+Kellner braucht gar keinen.
 
-**Besitzt:** `server/db/schema/restaurants.ts`, `shared/qr/`, `server/api/session/`, `app/pages/s/`
-**Kann sofort starten:** ja, Kodierung und Kellner-Seite gegen das Fixture-Menü
+**Besitzt:** `schema/restaurants.ts`, `server/api/places/`, `shared/qr/`, `app/pages/s/`
+**Kann sofort starten:** ja, Kodierung und Kellner-Seite gegen die Karten-Fixture
 
 ## Warum dieser Schnitt
 
-Die Grenzen liegen dort, wo ohnehin ein Datenformat übergeben wird: A→B ist `MenuDoc`,
-B→C ist die Menü-API, C→D ist der QR-Payload. Jede Grenze ist ein Format, für das ein Fixture
-existiert – deshalb kann jede Lane gegen das Fixture entwickeln, statt auf die Nachbar-Lane zu warten.
+Die Grenzen liegen dort, wo ohnehin ein Format übergeben wird: A↔C ist der Tick, B→C die
+Ausspiel-API, C↔D Places und der QR-Payload. Für jede Grenze gibt es ein Fixture, deshalb
+entwickelt jede Lane dagegen, statt auf die Nachbar-Lane zu warten.
 
-## Konfliktzonen und wie wir sie entschärfen
+## Konfliktzonen
 
 | Zone | Problem | Regel |
 |---|---|---|
-| `server/db/schema.ts` | alle brauchen es | in `server/db/schema/{restaurants,menus,scans}.ts` aufteilen, `index.ts` re-exportiert nur. Jede Lane besitzt ihre Datei |
-| Migrationen | Drizzle nummeriert fortlaufend, parallel erzeugt = Kollision | Migration-Dateien nie im Feature-Branch generieren. Vor dem Merge auf `main` neu generieren |
-| `shared/types/` | Vertrag von allen | nach Schritt 0 eingefroren. Änderung nur mit Zustimmung der betroffenen Lanes |
-| `restaurants`-Tabelle | von allen gelesen | gehört Lane D (kommt mit der Places-Auflösung), andere lesen nur |
-| `nuxt.config.ts`, `package.json` | jeder fügt mal was hinzu | kleine, sofort gemergte Commits statt langer Branches |
+| `server/db/schema.ts` | alle brauchen es | in Modul-Dateien aufteilen, `index.ts` re-exportiert nur. Jede Lane besitzt ihre Datei |
+| Migrationen | Drizzle nummeriert fortlaufend, parallel erzeugt = Kollision | nie im Feature-Branch generieren, sondern vor dem Merge auf `main` |
+| `menus`-Tabelle | A schreibt Items hinein, B besitzt den Lebenszyklus | B besitzt die Datei, A schreibt nur über die Upsert-Funktion, die B bereitstellt |
+| `shared/types/` | Vertrag von allen | nach Schritt 0 eingefroren |
+| `restaurants` | von allen gelesen | gehört Lane D, andere lesen nur |
+| `nuxt.config.ts`, `package.json` | jeder ergänzt mal etwas | kleine, sofort gemergte Commits statt langer Branches |
 
 ## Sync-Punkte
 
 - **Nach Schritt 0:** Verträge liegen auf `main`, alle vier starten.
-- **Erster Integrationspunkt:** A+B zusammen – ein echtes Foto ergibt ein gespeichertes Menü.
-- **Zweiter:** C+B – die Karte lädt aus der echten API statt aus Fixtures.
-- **Dritter:** C+D – QR erzeugen, scannen, Kellner sieht die Bestellung im Originaltext.
+- **Erster:** A+B – eine Tick-Folge erzeugt ein versiegeltes, abrufbares Menu.
+- **Zweiter:** C+A – echte Kamera füllt die Liste live.
+- **Dritter:** C+B+D – Karte aus dem Cache statt aus Fixtures, QR erzeugen, Kellner liest sie.
 
-Bis dahin ersetzt jede Lane ihre Mocks einzeln durch echte Aufrufe. Ein großer Big-Bang-Merge
-am Ende ist der Weg, auf dem diese Aufteilung schiefgeht.
+Jede Lane ersetzt ihre Mocks einzeln. Ein Big-Bang-Merge am Ende ist der Weg, auf dem diese
+Aufteilung schiefgeht.
+
+## Tests
+
+Ein einziger automatisierter Seam für alle Lanes: die Menu-HTTP-API mit dem Modell-Client als
+Test-Double. Getestet wird äußeres Verhalten, nicht Vue-Interna, Drizzle-Zeilenformen oder
+Prompt-Strings. Jede Lane liefert ihre Fälle in dieselbe Suite.
 
 ## Definition of Done pro Lane
 
-Eine Lane ist fertig, wenn: die eigenen Endpunkte/Seiten gegen echte Daten laufen, das Fixture
-weiterhin durchgeht, `restaurantId`-Scoping in jeder Query steht, der Originaltext der Karte
-über die eigene Grenze hinweg erhalten bleibt, und diese Grenze (das übergebene JSON) im
-Doc-Ordner beschrieben ist.
+Die eigenen Endpunkte oder Seiten laufen gegen echte Daten, die Fixtures gehen weiterhin durch,
+jede Query ist auf Menu oder Restaurant gescoped, der Originaltext bleibt über die eigene
+Grenze hinweg erhalten, und diese Grenze ist im Doc-Ordner beschrieben.
