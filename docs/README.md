@@ -48,12 +48,14 @@ Eine Bestellung ist keine Entität. Sie lebt im QR-Code.
 
 ### Restaurant
 Reiner Identitätsdatensatz, kein Konto, kein Besitzer.
-`id`, `googlePlaceId` (unique, nullable), `name`, `lat`, `lng`, `sourceLocale`, `currency`,
-`timezone`, `currentMenuId?`.
+`id`, `placeProvider` (`osm` | `google`), `placeId`, `name`, `lat`, `lng`, `sourceLocale`,
+`currency`, `timezone`, `currentMenuId?`. Unique über `(placeProvider, placeId)`.
 
-Die **Google Place ID ist der Anker**, an dem der Karten-Cache hängt: stabil, weltweit
-eindeutig, unabhängig von der Schreibweise. Lokale ohne Place ID (Straßenstand, zu neu)
-bekommen einen Datensatz mit Koordinaten; das Matching läuft dann über Distanz.
+Die **Ortsreferenz ist der Anker**, an dem der Karten-Cache hängt: stabil, eindeutig,
+unabhängig von der Schreibweise. In v1 ist das die **OSM-Objekt-ID** (`node/123456`), weil
+OpenStreetMap kostenlos ist. Das Feldpaar hält den Wechsel auf Google Places offen, ohne
+Migration. Lokale ohne Eintrag (Straßenstand, zu neu) bekommen einen Datensatz mit
+Koordinaten und `placeId = null`; das Matching läuft dann über Distanz.
 
 Ein Menu **darf auch ohne Restaurant existieren** – dann ist es ein Einmal-Scan ohne
 Cache-Nutzen. Das hält den Scan-Flow lauffähig, wenn Places nichts liefert oder der Gast
@@ -113,9 +115,10 @@ Gast gehört. Sobald dieselbe Karte gecacht und von einem deutschen, einem türk
 japanischen Gast gelesen wird, braucht es mehrere Sprachen nebeneinander – sonst überschreibt
 jeder Sprachwechsel die Arbeit des vorigen Gasts und das Modell läuft erneut.
 
-Gefüllt wird sie zweistufig: Der Extraktions-Tick liefert Original **und** Übersetzung in die
-Zielsprache des Scanners in einem Aufruf. Jede weitere Sprache wird beim ersten Abruf
-nachübersetzt, ohne neue Frames, und ist danach für alle da.
+Gefüllt wird sie zweistufig: Beim Versiegeln wird die Karte in einem Durchgang in die
+Zielsprache des Scanners übersetzt. Jede weitere Sprache entsteht beim ersten Abruf, ohne neue
+Frames, und ist danach für alle da. Während des Scans sieht der Gast den Originaltext – die
+Zeilen erscheinen ohnehin schneller, als er sie lesen kann.
 
 ### ScanSession
 `id`, `menuId`, `deviceToken`, `startedAt`, `endedAt?`, `tickCount`, `failureCount`, `model`.
@@ -158,7 +161,10 @@ ohne dass wir Auswahl serverseitig speichern.
 ```
 Gast öffnet App
   │
-  ├─ Geolocation ──► Places Nearby (Typ: restaurant/cafe/bar, Radius ~150 m)
+  ├─ Geolocation ──► eigener Geohash-Cache ──► Treffer? Liste direkt
+  │                         │
+  │                         └── leer ──► Overpass/OSM (amenity=restaurant|cafe|bar,
+  │                                       Radius ~150 m), Ergebnis in den Cache
   │                    └─► Liste nach Distanz – Gast tippt eines an, nie automatisch
   │
   └─ kein GPS / nichts gefunden ──► Textsuche oder „Karte scannen" ohne Restaurant
@@ -184,6 +190,10 @@ er die Karte noch in der Hand hat.
 korrigierte Zeilen), nie eine komplette Neuschreibung. Der Server upsertet auf
 `(menuId, sourceName, sourceSection)`.
 
+Der Tick liefert **nur Originaltext und Struktur, keine Übersetzung**. Übersetzt wird einmal
+beim Versiegeln über die ganze Karte – das hält die Ausgabe pro Frame kurz und liefert mit
+vollem Kartenkontext bessere Ergebnisse.
+
 Regeln, die aus dem Issue kommen und dort gut begründet sind:
 
 - **Kein Voll-Replace und kein Freeze-on-first-sight.** Eine früh halb gelesene Zeile darf
@@ -200,10 +210,14 @@ Regeln, die aus dem Issue kommen und dort gut begründet sind:
 Eine einseitige Karte ist ein einseitiges Booklet – derselbe Weg, kein zweiter Codepfad für
 Fotos.
 
-**Frame-Rate:** Das Issue nennt 2–5 fps. Das sind bei einem Minute-Scan bis zu 300
-Modellaufrufe. Weil ein Scan hier einem ganzen Restaurant zugutekommt, ist das vertretbar,
-aber der Client sollte trotzdem vorselektieren: unscharfe und zum Vorgänger nahezu identische
-Frames gar nicht erst senden. Ziel sind 1–2 tatsächlich gesendete Frames pro Sekunde (E13).
+**Bildrate:** keine feste. Das Issue nennt 2–5 fps; mit lokaler Inferenz (1–3 s pro Frame)
+würde das nur eine Warteschlange aufbauen, die nie abgearbeitet wird. Stattdessen ist immer
+**höchstens ein Tick unterwegs**, und der Client wählt aus den Frames seit der letzten Antwort
+den besten aus: scharf, und deutlich verschieden vom zuletzt gesendeten. Unscharfe und nahezu
+identische Bilder werden verworfen, statt sie zu senden (E13).
+
+Der Hinweistext muss dazu passen: langsam schwenken und auf jedem Abschnitt kurz verweilen.
+Das ist ohnehin die Bewegung, die brauchbare Frames erzeugt.
 
 ## Wann wird neu gescannt
 
@@ -221,54 +235,77 @@ Bereits erzeugte QR-Codes zeigen auf die alte `menuId` und bleiben korrekt.
 ## Modellzugriff
 
 Der Server spricht eine **OpenAI-kompatible Chat-Completions-API**, konfiguriert über
-`MODEL_BASE_URL`, `MODEL_API_KEY`, `MODEL_NAME`. Kein anbieterspezifisches SDK. Der Schlüssel
-liegt ausschließlich serverseitig; der Browser ruft nie einen Modellanbieter direkt auf.
+`MODEL_BASE_URL`, `MODEL_API_KEY`, `MODEL_NAME`. Kein anbieterspezifisches SDK. Der Browser
+ruft nie ein Modell direkt auf.
 
-Das ist die Entscheidung aus dem Issue, und sie ist auch dann richtig, wenn Gemini das Modell
-der Wahl ist: Gemini bietet unter `https://generativelanguage.googleapis.com/v1beta/openai/`
-selbst einen OpenAI-kompatiblen Endpunkt mit Bild-Input, `response_format` per JSON-Schema und
-Streaming. Die generische Schnittstelle kostet uns also nichts und bringt drei Dinge:
-Anbieterwechsel per Env, ein Fake-Modell im Test, und keine Abhängigkeit von einem SDK-Release.
-Gemini-Spezifika wie Thinking-Budget oder explizites Context-Caching brauchen `extra_body` –
-unser Tick nutzt keins davon.
+**Gefahren wird lokal, nicht über eine Cloud-API.** Es sollen keine laufenden Token-Kosten
+entstehen, und Kamerabilder fremder Tische sollen die eigene Maschine gar nicht erst verlassen.
 
-Antworten werden per JSON-Schema erzwungen und serverseitig validiert, bevor sie in die DB
-gehen. Ein Tick, dessen Antwort nicht validiert, zählt als Fehlschlag und ändert nichts.
+| | Empfehlung |
+|---|---|
+| Modell | **Qwen3-VL-8B-Instruct** – führend unter den kleinen offenen VLMs bei Dokumentenlesen (96,1 DocVQA), Apache 2.0, ~6 GB in 4-Bit-Quantisierung |
+| Server | **vLLM** (schneller, `structured_outputs` mit JSON-Schema) oder **Ollama** (deutlich einfacher aufzusetzen, JSON-Schema über `format`) |
+| Hardware | eine GPU mit ≥8 GB VRAM. Ohne GPU ist der Live-Scan nicht benutzbar |
+
+Beide Server sprechen dieselbe OpenAI-kompatible Schnittstelle. Für den Wechsel auf einen
+gehosteten Anbieter ändern sich nur die drei Env-Variablen, kein Code. Genau dafür ist die
+generische API da – auch Gemini bietet unter
+`https://generativelanguage.googleapis.com/v1beta/openai/` einen kompatiblen Endpunkt.
+
+Antworten werden per JSON-Schema erzwungen und serverseitig nochmals validiert. Ein Tick,
+dessen Antwort nicht validiert, zählt als Fehlschlag und ändert nichts.
+
+### Was lokale Inferenz am Design ändert
+
+Ein 8B-Modell auf einer Consumer-GPU braucht für einen Frame grob **1–3 Sekunden**, nicht die
+200 ms einer Cloud-API. Drei Anpassungen folgen daraus, und sie stehen so auch in den
+Scan-Regeln:
+
+1. **Keine feste Bildrate.** Es ist immer höchstens **ein Tick unterwegs**; der nächste Frame
+   geht erst raus, wenn der vorige beantwortet ist. Die Rate ergibt sich aus der Hardware,
+   statt eine Warteschlange zu füllen, die das Modell nie abarbeitet.
+2. **Der Tick übersetzt nicht.** Er liest nur Struktur und Originaltext. Das halbiert die
+   Ausgabelänge und damit die Wartezeit pro Frame.
+3. **Übersetzt wird beim Versiegeln**, einmal über die ganze Karte statt häppchenweise – ein
+   Aufruf, bei dem Latenz nicht mehr stört, und mit dem ganzen Kartenkontext sogar bessere
+   Ergebnisse. Weitere Sprachen kommen später on demand dazu.
+
+Der Scan dauert damit spürbar länger als mit einer Cloud-API. Das ist vertretbar, weil er
+dank Cache nur den ersten Gast eines Restaurants trifft.
 
 ## Was das kostet
 
-Kostenlos ist es nur in der Entwicklung. Die Zahlen, damit die Entscheidung auf Fakten steht:
+Ziel ist ein Betrieb ohne laufende Kosten. Das ist erreichbar, aber nur mit Hardware, die
+ohnehin läuft.
 
-**Modell.** Gemini 2.5 Flash-Lite kostet $0.10 pro 1M Input- und $0.40 pro 1M Output-Tokens.
-Ein Tick sind grob 1.500–2.000 Input-Tokens (Frame plus aktuelle Item-Liste) und ~150 Output-Tokens.
-Bei rund 120 gesendeten Frames für eine Karte landet ein **kompletter Scan bei etwa 2–3 Cent**.
-Nachübersetzung in eine weitere Sprache kostet einen Bruchteil davon.
+**Modell: null Token-Kosten.** Lokale Inferenz kostet Strom und eine GPU, sonst nichts.
+Zum Vergleich, was wir uns damit sparen: Über eine Cloud-API (Gemini 2.5 Flash-Lite, $0.10/1M
+Input, $0.40/1M Output) läge ein kompletter Kartenscan bei etwa 2–3 Cent, durch den Cache
+einmal pro Restaurant – rund 25 Dollar für 1.000 Lokale.
 
-Genau hier zahlt sich der Cache aus: Diese 2–3 Cent fallen **einmal pro Restaurant** an, nicht
-pro Gast. 1.000 erfasste Lokale kosten damit ungefähr 25 Dollar, dauerhaft. Im Modell aus
-Issue #1, wo jeder Besuch neu scannt, skaliert derselbe Betrag mit der Zahl der Gäste.
+**Die Falle dabei:** Eine gemietete Cloud-GPU ist die *teuerste* Variante, nicht die
+günstigste. Sie kostet rund um die Uhr, auch wenn niemand scannt, und übersteigt die
+API-Kosten um ein Vielfaches. „Lokal" heißt hier eigene Maschine oder Heimserver. Soll die App
+später öffentlich und ohne eigene Hardware laufen, ist eine Cloud-API die billigere Antwort –
+der Wechsel kostet dank `MODEL_BASE_URL` keine Zeile Code.
 
-**Der Free Tier** der Gemini API ist echt kostenlos, hat aber eine Bedingung, die für uns nicht
-funktioniert: Inhalte werden zur Produktverbesserung verwendet. Fotos fremder Speisekarten und
-Tische dorthin zu schicken, ist in Produktion nicht vertretbar. Für lokale Entwicklung und
-Tests ist er richtig.
+**Der Free Tier** der Gemini API wäre nominell kostenlos, verwendet Inhalte aber zur
+Produktverbesserung. Fotos fremder Speisekarten und Tische dorthin zu schicken, ist nicht
+vertretbar. Ein weiterer Grund für lokal.
 
-**Google Places ist vermutlich der größere Posten**, nicht das Modell: Ein Nearby-Search-Aufruf
-liegt in der Größenordnung von Cents und fällt bei **jedem App-Start** an, nicht nur beim
-Scannen. Drei Gegenmittel:
+**Ortssuche ohne Google.** Places kostet pro Aufruf und würde bei *jedem App-Start* anfallen –
+damit wäre es der größte Posten, obwohl das Modell nichts kostet. Stattdessen:
 
-- Nearby-Ergebnisse serverseitig pro Geohash-Zelle cachen, statt jeden Start durchzureichen.
-- Place IDs dürfen laut Googles Bedingungen dauerhaft gespeichert werden, andere Felder nur
-  begrenzt – unser Anker ist deshalb ohnehin die ID.
-- Als kostenlose Alternative kommt OpenStreetMap (Overpass/Nominatim) für die Umkreissuche in
-  Frage; die OSM-Objekt-ID träte dann an die Stelle der Place ID. Das ist der Weg, wenn die
-  App wirklich ohne laufende Kosten auskommen soll (E14).
+- **OpenStreetMap** als Quelle, über Overpass abgefragt. Kostenlos, aber mit Fair-Use-Limits.
+- **Jede Antwort landet in unserer eigenen Tabelle**, indiziert über Geohash-Zellen. Der Cache
+  füllt sich dadurch von selbst: Ein Ort, der einmal abgefragt wurde, braucht Overpass nie
+  wieder. Das hält uns zugleich innerhalb der Fair-Use-Grenzen.
+- Wird das zu knapp, wandert ein OSM-Auszug der Zielregion per PostGIS in unsere Postgres und
+  die Umkreissuche wird eine SQL-Abfrage ohne jeden externen Dienst (E14).
 
-**Wirklich kostenlos in Produktion** geht nur mit einem selbst gehosteten Vision-Modell hinter
-derselben OpenAI-kompatiblen Schnittstelle (Ollama, vLLM, llama.cpp). Dann fallen keine
-Token-Kosten an, dafür Serverkosten und eine schlechtere Extraktionsqualität. Weil der
-Zugriff über `MODEL_BASE_URL` konfiguriert ist, kostet dieser Wechsel keine Codeänderung –
-das ist ein weiteres Argument für die generische API.
+Damit ist von „mit Google verbunden" wenig übrig: kein Sign-In, keine Places, kein Gemini.
+Falls Google-Anbindung ein eigenes Ziel war und nicht nur der Weg zu Ortsdaten und einem
+Vision-Modell, ist das die Stelle, an der wir das bewusst aufgeben (E6).
 
 ## Prinzipien, die das Modell tragen
 
@@ -282,7 +319,10 @@ das ist ein weiteres Argument für die generische API.
    längst eine neuere Karte existiert.
 5. **Wir erfinden nichts.** Kein Preis ohne gedruckte Zahl, keine Karte aus einem leeren
    Extrakt, keine Allergenangabe aus dem Bauch.
-6. **Bilder gehören uns nicht.** Frames werden nach dem Modellaufruf verworfen.
+6. **Bilder gehören uns nicht.** Frames werden nach dem Modellaufruf verworfen und gehen bei
+   lokaler Inferenz an keinen fremden Dienst.
+7. **Kein laufender Kostenposten.** Modell lokal, Ortsdaten aus OSM mit eigenem Cache. Wo ein
+   externer Dienst nötig wäre, wird zuerst nach der kostenlosen Variante gesucht.
 
 ## Konventionen
 
@@ -321,21 +361,21 @@ Menü-Suche. Zahlungen.
 
 | # | Frage | Vorschlag |
 |---|---|---|
-| E1 | Speicher für Frames | entfällt – Frames werden nie persistiert |
-| E2 | Modellanbieter | OpenAI-kompatible API per Env; Gemini Flash als Default-Modell dahinter |
-| E3 | Übersetzung | im selben Tick wie die Extraktion, weitere Sprachen on demand |
+| E1 | Speicher für Frames | entfällt – Frames werden nie persistiert und verlassen bei lokaler Inferenz die Maschine nicht |
+| E2 | Modell | lokal: Qwen3-VL-8B über vLLM oder Ollama, OpenAI-kompatibel per Env |
+| E3 | Übersetzung | einmal beim Versiegeln über die ganze Karte, weitere Sprachen on demand |
 | E4 | Job-Queue | entfällt – Ticks laufen synchron, es gibt keinen Batch-Job |
 | E5 | Zahlungen | nein, die Bestellung endet beim Kellner |
-| E6 | Was heißt „mit Google connected"? | Places und Geolocation für die Restaurant-Identität; Gemini nur als Modell hinter der generischen API |
+| E6 | Was heißt „mit Google connected"? | **In v1 nichts.** Ortsdaten von OSM, Modell lokal. Falls Google-Anbindung ein eigenes Ziel ist, muss das hier neu entschieden werden |
 | E7 | Wann ist ein Scan dieselbe Karte? | Ähnlichkeit über `sourceName` und Preise; ab Schwelle bestätigen statt neu anlegen |
 | E8 | Veraltete Preise | Datum der Kartenversion im Ticket zeigen, der Kellner entscheidet |
 | E9 | Missbrauch | Device-Token, Geo-Nähe-Prüfung, Rate Limits, unbestätigte Karten kennzeichnen |
 | E10 | Wann braucht es doch eine `orders`-Tabelle? | sobald der Kellner bestätigen soll oder Freitext-Notizen nötig werden |
 | E11 | Ab wann ist eine Karte veraltet? | 90 Tage, früher bei Meldung „Preise stimmen nicht" |
 | E12 | Darf ein Einzelscan die Karte für alle ersetzen? | ja, aber nur mit Geo-Nähe-Prüfung |
-| E13 | Frame-Rate und Vorauswahl | Client filtert unscharfe und redundante Frames, Ziel 1–2 gesendete fps |
-| E14 | Places kostenpflichtig – Alternative? | Geohash-Cache; falls die App ohne laufende Kosten auskommen muss, OSM/Overpass statt Places |
-| E15 | Betriebsmodell der Modellkosten | Erst geklärt, wer zahlt: Free Tier nur in Dev, Prod entweder bezahlt oder selbst gehostet |
+| E13 | Bildrate | keine feste Rate: ein Tick in Flight, Client wählt den besten Frame seit der letzten Antwort |
+| E14 | Ortsdaten | OSM über Overpass, jede Antwort in den eigenen Geohash-Cache. Bei zu engem Fair-Use: OSM-Auszug per PostGIS lokal |
+| E15 | Wo läuft die GPU? | eigene Maschine oder Heimserver. Eine gemietete Cloud-GPU wäre teurer als eine Cloud-API und damit die schlechteste Option |
 
 ## Status
 

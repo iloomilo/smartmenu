@@ -15,7 +15,9 @@ Einmal festlegen, dann einfrieren:
    Patch-JSON-Schema, das dem Modell vorgegeben und gegen das validiert wird.
 3. **QR-Payload** (`shared/types/qr.ts`): Binärlayout und Kodierung.
 4. **Modell-Client-Interface** (`server/services/model/`): eine Funktion, ein Fake daneben.
-   Ohne dieses Interface kann niemand testen.
+   Ohne dieses Interface kann niemand testen. Dazu ein `docker-compose`-Profil oder eine
+   Anleitung, die das lokale Modell startet – sonst kann Lane A nicht gegen echte Antworten
+   entwickeln.
 5. **Fixtures** (`shared/fixtures/`): eine realistische Karte als Item-Liste, eine Tick-Folge
    aus Patches (inklusive Verfeinerung derselben Zeile), ein QR-Payload, zwei Sprachstände.
 6. **Fehlerformat** und die Scoping-Regel (jede Query auf ein Menu oder ein Restaurant).
@@ -29,10 +31,11 @@ Vom Frame zum gespeicherten Item.
 
 - `POST /api/menus/:id/ticks`: Frame entgegennehmen, Modell aufrufen, Patches validieren, upserten
 - Modell-Client gegen die OpenAI-kompatible API (`MODEL_BASE_URL`, `MODEL_API_KEY`, `MODEL_NAME`),
-  Antwort per JSON-Schema erzwungen
+  Antwort per JSON-Schema erzwungen. Lokal: Qwen3-VL-8B über vLLM oder Ollama
+- Nur ein Tick gleichzeitig in Bearbeitung; der Endpunkt lehnt einen zweiten ab, statt zu stauen
 - Upsert auf `(menuId, sourceName, sourceSection)`; Verfeinern statt Duplizieren
 - Frames nach dem Aufruf verwerfen, auch im Fehlerfall. Nichts auf Platte, nichts in Postgres
-- Sprach-Erkennung und Übersetzung in die Zielsprache im selben Aufruf
+- Sprach-Erkennung. **Keine** Übersetzung im Tick – die macht Lane B beim Versiegeln
 - Fehlerzählung pro Session, retryable Fehler nach außen sichtbar machen
 
 **Besitzt:** `server/api/menus/[id]/ticks*`, `server/services/model/`, `server/services/extract/`, `schema/scans.ts`
@@ -45,6 +48,7 @@ Von Items zu einer gecachten, mehrsprachigen Karte.
 - Menu-Lebenszyklus `scanning → sealed`, Positionen beim Versiegeln stabil vergeben
 - Cache: `currentMenuId` pro `kind`, Freshness, Ablösung über `supersededById`
 - Matching beim Neu-Scan: identisch → nur `confirmCount`/`lastConfirmedAt`, abweichend → neue Version (E7)
+- Übersetzung beim Versiegeln in einem Durchgang über die ganze Karte
 - Translation-Tabelle, Fallback-Kette, Nachübersetzung weiterer Sprachen ohne neue Frames
 - `GET /api/menus/:id?locale=` – die Ausspiel-API, nach Sektionen gruppiert
 
@@ -57,8 +61,8 @@ Alles, was der Gast sieht.
 
 - Restaurant-Picker: Vorschlagsliste nach Distanz, Textsuche als Fallback
 - Kamera-Vollbild mit Bottom Sheet, Hinweistext, Trefferzähler
-- **Frame-Auswahl im Client**: unscharfe und zum Vorgänger nahezu identische Frames gar nicht
-  senden, Ziel 1–2 gesendete fps (E13)
+- **Frame-Auswahl im Client**: immer nur ein Tick in Flight, dazwischen den besten Frame
+  wählen (scharf, deutlich verschieden zum letzten). Keine feste Bildrate (E13)
 - Liste stabil halten: kein Flackern, kein Voll-Replace, Auswahl hängt an `menuItem.id`
 - Pause bei Hintergrund, harte Zeitgrenze mit „Fortsetzen", Kamera aus nach „Fertig"
 - Fehlerserie: Liste behalten, pausieren, „Erneut versuchen"
@@ -72,10 +76,10 @@ Alles, was der Gast sieht.
 ### Lane D – Restaurant-Identität, QR & Kellner
 Ort rein, gescannte Bestellung raus.
 
-- Geolocation → Nearby-Suche → Vorschlagsliste, Auflösung auf `googlePlaceId`,
-  Anlage neuer Restaurant-Datensätze, Fallback ohne GPS
-- **Nearby-Ergebnisse pro Geohash-Zelle serverseitig cachen** – der Aufruf fällt sonst bei
-  jedem App-Start an und ist teurer als das Modell (E14)
+- Geolocation → Umkreissuche über **Overpass/OSM** → Vorschlagsliste, Auflösung auf
+  `(placeProvider, placeId)`, Anlage neuer Restaurant-Datensätze, Fallback ohne GPS
+- **Jede Overpass-Antwort in einen eigenen Geohash-Cache schreiben.** Der Aufruf fällt sonst
+  bei jedem App-Start an; der Cache hält uns zugleich in den Fair-Use-Grenzen (E14)
 - QR-Payload kodieren und dekodieren, Versionsbyte, Ziel unter 100 Byte
 - Kellner-Ansicht `/s/:payload`: Originaltext groß, Übersetzung klein darunter, Mengen, Summe
   nur über Zeilen mit Preis. Kein Login
@@ -84,7 +88,7 @@ Ort rein, gescannte Bestellung raus.
 Diese Lane baut kein Auth-System. Es gibt einen anonymen Gast-Zugang per Device-Token, und der
 Kellner braucht gar keinen.
 
-**Besitzt:** `schema/restaurants.ts`, `server/api/places/`, `shared/qr/`, `app/pages/s/`
+**Besitzt:** `schema/restaurants.ts`, `server/api/places/`, `server/services/osm/`, `shared/qr/`, `app/pages/s/`
 **Kann sofort starten:** ja, Kodierung und Kellner-Seite gegen die Karten-Fixture
 
 ## Warum dieser Schnitt
