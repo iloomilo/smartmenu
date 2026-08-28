@@ -18,9 +18,12 @@ Einmal festlegen, dann einfrieren:
    Ohne dieses Interface kann niemand testen. Dazu ein `docker-compose`-Profil oder eine
    Anleitung, die das lokale Modell startet – sonst kann Lane A nicht gegen echte Antworten
    entwickeln.
-5. **Fixtures** (`shared/fixtures/`): eine realistische Karte als Item-Liste, eine Tick-Folge
+5. **Frontend-Grundgerüst**: `@tailwindcss/vite`, `shadcn-nuxt` und `motion-v/nuxt` in
+   `nuxt.config.ts`, plus die Basiskomponenten (Drawer, Button, Sheet). Gehört hierher und
+   nicht in Lane C, weil `nuxt.config.ts` und `package.json` sonst zur Konfliktzone werden.
+6. **Fixtures** (`shared/fixtures/`): eine realistische Karte als Item-Liste, eine Tick-Folge
    aus Patches (inklusive Verfeinerung derselben Zeile), ein QR-Payload, zwei Sprachstände.
-6. **Fehlerformat** und die Scoping-Regel (jede Query auf ein Menu oder ein Restaurant).
+7. **Fehlerformat** und die Scoping-Regel (jede Query auf ein Menu oder ein Restaurant).
 
 Alles darunter ist Vertrag. Wer ihn ändert, macht es sichtbar, nicht nebenbei.
 
@@ -60,10 +63,12 @@ Von Items zu einer gecachten, mehrsprachigen Karte.
 Alles, was der Gast sieht.
 
 - Restaurant-Picker: Vorschlagsliste nach Distanz, Textsuche als Fallback
-- Kamera-Vollbild mit Bottom Sheet, Hinweistext, Trefferzähler
+- Kamera-Vollbild mit Bottom Sheet (shadcn-vue Drawer), Hinweistext, Trefferzähler
 - **Frame-Auswahl im Client**: immer nur ein Tick in Flight, dazwischen den besten Frame
   wählen (scharf, deutlich verschieden zum letzten). Keine feste Bildrate (E13)
-- Liste stabil halten: kein Flackern, kein Voll-Replace, Auswahl hängt an `menuItem.id`
+- Liste stabil halten: kein Flackern, kein Voll-Replace, Auswahl hängt an `menuItem.id`.
+  Animationsregeln aus README beachten – verfeinerte Zeilen bewegen sich nicht, es wird
+  während des Scans nicht umsortiert
 - Pause bei Hintergrund, harte Zeitgrenze mit „Fortsetzen", Kamera aus nach „Fertig"
 - Fehlerserie: Liste behalten, pausieren, „Erneut versuchen"
 - Mengen-Review, QR-Code lokal erzeugen

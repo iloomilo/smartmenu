@@ -307,6 +307,34 @@ Damit ist von „mit Google verbunden" wenig übrig: kein Sign-In, keine Places,
 Falls Google-Anbindung ein eigenes Ziel war und nicht nur der Weg zu Ortsdaten und einem
 Vision-Modell, ist das die Stelle, an der wir das bewusst aufgeben (E6).
 
+## Frontend-Stack
+
+- **shadcn-vue** (`shadcn-nuxt` plus `@tailwindcss/vite`, Tailwind v4). Komponenten werden in
+  `app/components/ui` kopiert statt als Abhängigkeit eingebunden – sie gehören uns und dürfen
+  angepasst werden. Basis ist Reka UI, der Vue-Port von Radix, also mit Fokus-Handling und
+  Tastaturbedienung ab Werk. Der **Drawer** ist das Bottom Sheet des Scan-Screens.
+- **motion-v** (`motion-v/nuxt`) für Bewegung: `<motion>`-Elemente, `<AnimatePresence>` für
+  Austritte, `layout` für Layout-Übergänge.
+
+### Animationsregeln für die Live-Liste
+
+Während des Scans schreibt das Modell alle paar Sekunden in eine Liste, in die der Gast
+gleichzeitig tippt. Bewegung ist hier ein Risiko, kein Schmuck:
+
+- **Neue Zeile: Einblenden erlaubt.** Kurz, unter 200 ms, kein Springen der Nachbarn.
+- **Verfeinerte Zeile: keine Animation.** Wenn ein späterer Tick Preis oder Beschreibung
+  nachträgt, wird der Text still ersetzt. Kein Aufblitzen, kein Layout-Sprung – die Zeile
+  darf sich nicht unter dem Finger bewegen, der gerade darauf zielt.
+- **Keine Umsortierung während des Scans.** Neue Sektionen werden in der Reihenfolge
+  angehängt, in der sie entdeckt werden, nicht in die Kartenreihenfolge einsortiert. Sortiert
+  und gruppiert wird erst in der Ansicht der versiegelten Karte.
+- **`layout` nur außerhalb des Scan-Sheets.** Im Sheet erzeugt die Layout-Engine genau die
+  Sprünge, die wir vermeiden wollen.
+- **`prefers-reduced-motion` respektieren**, per Media-Query abgesichert und nicht nur auf
+  Bibliotheksverhalten vertrauend.
+- **Die Kellner-Ansicht animiert nichts.** Sie wird im Betrieb gelesen, in Eile, oft schräg
+  auf ein Display geschaut. Große Typografie, statisch.
+
 ## Prinzipien, die das Modell tragen
 
 1. **Der Originaltext ist die Autorität.** Er wird durch Extraktion, Übersetzung und
@@ -326,7 +354,9 @@ Vision-Modell, ist das die Stelle, an der wir das bewusst aufgeben (E6).
 
 ## Konventionen
 
-- **Sprache:** Code, Kommentare und Docs auf Deutsch; Bezeichner auf Englisch.
+- **Sprache:** Code, Kommentare und Docs auf Deutsch; Bezeichner auf Englisch. GitHub-Issues
+  auf Englisch, weil Issue #1 so begonnen wurde.
+- **Frontend:** Nuxt 4, shadcn-vue auf Tailwind v4, motion-v. Keine zweite UI-Bibliothek.
 - **IDs:** `uuid` v7 für alles extern Referenzierte. Keine fortlaufenden Zahlen in URLs oder QR.
 - **Geld:** `numeric(12,3)`, nullable, plus `currency` (ISO 4217) am Menu – eine Währung pro
   Karte. **Kein `float`** (Summierung des Tickets) und **keine Cents-Ganzzahl** (das Issue
