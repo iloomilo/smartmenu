@@ -569,10 +569,14 @@ h2 {
 }
 
 .sheet-foot .btn,
-.panel-foot .btn,
-.ticket .btn {
+.panel-foot .btn {
   flex: 1;
   width: 100%;
+}
+
+.ticket .btn {
+  width: 100%;
+  flex: 0 0 auto;
 }
 
 .empty {
